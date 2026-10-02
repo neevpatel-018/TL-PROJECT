@@ -1,0 +1,6 @@
+{
+  "name": "Tinkerers' Lab Project Portal",
+  "description": "Project registration, staff approvals, resource requests, inventory, issue/return records, and audit events for Tinkerers' Lab.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

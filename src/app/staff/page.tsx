@@ -1,0 +1,175 @@
+import Link from "next/link";
+import { requireStaff } from "@/lib/auth";
+import { createAdminClient } from "@/lib/supabase/admin";
+import ReviewQueue from "./review-queue";
+import { mockDb, isSupabaseConfigured } from "@/lib/mock-db";
+
+type StaffProject = {
+  id: string;
+  title: string;
+  lead_name: string;
+  lead_email: string;
+  organization: string;
+  status: string;
+  created_at: string;
+  reference_code: string;
+};
+
+type InventoryItemWithBalance = {
+  id: string;
+  name: string;
+  sku: string;
+  category: string;
+  item_type: string;
+  reorder_level: number;
+  stock_balances?: { quantity_on_hand: number; quantity_reserved: number }[];
+};
+
+type ResourceRequest = {
+  id: string;
+  status: string;
+  projects: { title: string; reference_code: string } | null;
+  resource_request_lines: {
+    id: string;
+    quantity_requested: number;
+    quantity_approved: number;
+    inventory_items: { name: string; unit: string } | null;
+  }[];
+};
+
+export default async function StaffPage() {
+  await requireStaff();
+
+  let projects: StaffProject[] | null = null;
+  let items: InventoryItemWithBalance[] | null = null;
+  let requests: ResourceRequest[] | null = null;
+
+  if (isSupabaseConfigured()) {
+    try {
+      const admin = createAdminClient();
+      const [projectsRes, itemsRes, requestsRes] = await Promise.all([
+        admin.from("projects").select("id,title,lead_name,lead_email,organization,status,created_at,reference_code").order("created_at", { ascending: false }).limit(100),
+        admin.from("inventory_items").select("id,name,sku,category,item_type,reorder_level,stock_balances(quantity_on_hand,quantity_reserved)").eq("is_archived", false).order("name").limit(200),
+        admin.from("resource_requests").select("id,project_id,status,created_at,projects(title,reference_code),resource_request_lines(id,quantity_requested,quantity_approved,inventory_items(name,unit))").order("created_at", { ascending: false }).limit(100).returns<ResourceRequest[]>(),
+      ]);
+      projects = projectsRes.data;
+      items = itemsRes.data;
+      requests = requestsRes.data;
+    } catch {
+      // Fall through to mockDb
+    }
+  }
+
+  if (!projects || projects.length === 0) {
+    projects = mockDb.getProjects().map((p) => ({
+      id: p.id,
+      title: p.title,
+      lead_name: p.lead_name,
+      lead_email: p.lead_email,
+      organization: p.organization,
+      status: p.status,
+      created_at: p.created_at,
+      reference_code: p.reference_code,
+    }));
+  }
+  if (!items || items.length === 0) {
+    items = mockDb.getInventory();
+  }
+  if (!requests || requests.length === 0) {
+    requests = mockDb.getResourceRequests();
+  }
+
+  const pending = (projects || []).filter((p) => p.status === "pending");
+  const low = (items || []).filter((i) => (i.stock_balances?.[0]?.quantity_on_hand ?? 0) <= i.reorder_level);
+
+  return (
+    <main className="mx-auto max-w-7xl px-5 py-10">
+      <div className="flex items-center justify-between">
+        <Link href="/" className="text-sm text-tl-blue">← Home</Link>
+        <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800">
+          Staff Session Active
+        </span>
+      </div>
+      <div className="mt-3">
+        <h1 className="text-3xl font-bold text-tl-navy">TL staff workspace</h1>
+        <p className="mt-1 text-slate-600">Review proposals, monitor resources, and keep inventory records up to date.</p>
+      </div>
+      <div className="mt-6 grid gap-4 sm:grid-cols-3">
+        {[
+          ["Pending projects", pending.length],
+          ["Inventory items", (items || []).length],
+          ["Low-stock items", low.length],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-2xl border bg-white p-5">
+            <div className="text-sm text-slate-500">{label}</div>
+            <div className="mt-2 text-3xl font-bold text-tl-navy">{value}</div>
+          </div>
+        ))}
+      </div>
+      <section className="mt-8 rounded-2xl border bg-white">
+        <div className="border-b p-5">
+          <h2 className="text-xl font-bold">Project review queue</h2>
+          <p className="mt-1 text-sm text-slate-500">First 100 projects, newest first.</p>
+        </div>
+        <ReviewQueue projects={pending} />
+      </section>
+      <section className="mt-8 rounded-2xl border bg-white">
+        <div className="border-b p-5">
+          <h2 className="text-xl font-bold">Inventory overview</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="p-4">Item</th>
+                <th className="p-4">SKU</th>
+                <th className="p-4">Type</th>
+                <th className="p-4">On hand</th>
+                <th className="p-4">Reorder at</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {(items || []).map((i) => (
+                <tr key={i.id}>
+                  <td className="p-4 font-medium">{i.name}</td>
+                  <td className="p-4">{i.sku}</td>
+                  <td className="p-4 capitalize">{i.item_type}</td>
+                  <td className="p-4">{i.stock_balances?.[0]?.quantity_on_hand ?? 0}</td>
+                  <td className="p-4">
+                    {i.reorder_level}
+                    {(i.stock_balances?.[0]?.quantity_on_hand ?? 0) <= i.reorder_level && (
+                      <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-amber-800">Low</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="mt-8 rounded-2xl border bg-white">
+        <div className="border-b p-5">
+          <h2 className="text-xl font-bold">Resource requests</h2>
+          <p className="mt-1 text-sm text-slate-500">Requests are shown for visibility; line-level approval still needs completing.</p>
+        </div>
+        <div className="divide-y">
+          {!requests?.length ? (
+            <p className="p-5 text-slate-500">No resource requests yet.</p>
+          ) : (
+            requests.map((request) => (
+              <div key={request.id} className="p-5">
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="font-medium">{request.projects?.title || "Project"}</span>
+                  <span className="text-sm capitalize text-slate-500">{request.status.replaceAll("_", " ")}</span>
+                </div>
+                <div className="mt-2 text-sm text-slate-600">
+                  {request.resource_request_lines?.map((line) => `${line.inventory_items?.name || "Item"}: ${line.quantity_requested} ${line.inventory_items?.unit || ""}`).join(" · ") || "No line items"}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
