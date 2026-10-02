@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { getSignedInUser } from "@/lib/auth";
 import { mockDb, isSupabaseConfigured } from "@/lib/mock-db";
+import { SignOutButton } from "@/components/sign-out-button";
 
 type DashboardProject = {
   id: string;
@@ -46,18 +47,24 @@ export default async function Dashboard() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <Link href="/" className="text-sm text-tl-blue">← Home</Link>
-          <h1 className="mt-3 text-3xl font-bold">My projects</h1>
+          <div className="flex items-center gap-3 mt-3">
+            <h1 className="text-3xl font-bold">My projects</h1>
+            <span className="rounded-full bg-sky-100 text-sky-800 text-xs px-2.5 py-0.5 font-semibold capitalize">
+              {user.role || "student"}
+            </span>
+          </div>
           <p className="mt-1 text-slate-600">{user.email}</p>
         </div>
-        <div className="flex gap-2">
-          {user.role === "staff" && (
-            <Link href="/staff" className="rounded-lg bg-tl-navy px-4 py-2 text-white">
+        <div className="flex items-center gap-2">
+          {(user.role === "staff" || user.role === "admin") && (
+            <Link href="/staff" className="rounded-lg bg-tl-navy px-4 py-2 text-white text-sm font-semibold hover:bg-slate-800 transition">
               Staff Portal
             </Link>
           )}
-          <Link href="/register-project" className="rounded-lg bg-tl-blue px-4 py-2 text-white">
+          <Link href="/register-project" className="rounded-lg bg-tl-blue px-4 py-2 text-white text-sm font-semibold hover:bg-sky-600 transition">
             Register project
           </Link>
+          <SignOutButton />
         </div>
       </div>
       <div className="mt-7 overflow-hidden rounded-2xl border bg-white">

@@ -3,6 +3,7 @@ import { requireStaff } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import ReviewQueue from "./review-queue";
 import { mockDb, isSupabaseConfigured } from "@/lib/mock-db";
+import { SignOutButton } from "@/components/sign-out-button";
 
 type StaffProject = {
   id: string;
@@ -86,9 +87,18 @@ export default async function StaffPage() {
     <main className="mx-auto max-w-7xl px-5 py-10">
       <div className="flex items-center justify-between">
         <Link href="/" className="text-sm text-tl-blue">← Home</Link>
-        <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800">
-          Staff Session Active
-        </span>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/dashboard"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+          >
+            Student View
+          </Link>
+          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800">
+            Admin / Staff Session
+          </span>
+          <SignOutButton />
+        </div>
       </div>
       <div className="mt-3">
         <h1 className="text-3xl font-bold text-tl-navy">TL staff workspace</h1>

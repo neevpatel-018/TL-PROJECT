@@ -821,10 +821,22 @@ export default function LabPortalDashboard() {
             )}
 
             <Link
-              href="/login"
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              href="/login?tab=register"
+              className="rounded-lg border border-sky-200 bg-sky-50/80 px-2.5 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100 transition hidden sm:inline-flex"
             >
-              Staff Portal
+              Register
+            </Link>
+            <Link
+              href="/login?role=student"
+              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+            >
+              Student Sign In
+            </Link>
+            <Link
+              href="/login?role=admin"
+              className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 shadow-sm transition"
+            >
+              Admin / Staff
             </Link>
           </div>
         </div>
