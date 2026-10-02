@@ -14,8 +14,21 @@ import {
   GraduationCap,
   Briefcase,
   Trash2,
-  AlertCircle
+  AlertCircle,
+  ExternalLink,
+  Check,
+  X,
+  RefreshCw,
+  LogOut,
+  FileSpreadsheet
 } from "lucide-react";
+import {
+  initAuth,
+  googleSignIn,
+  logoutGoogle,
+  setAccessTokenInMemory,
+} from "@/lib/google-auth";
+import type { User } from "firebase/auth";
 
 type Project = {
   id: string;
@@ -34,6 +47,10 @@ type Project = {
   faculty_name?: string;
   section_number?: string;
   other_role?: string;
+  other_phone?: string;
+  approval_status?: "PENDING" | "YES" | "NO";
+  review_note?: string;
+  reviewed_by?: string;
 };
 
 type ToolItem = {
@@ -53,6 +70,11 @@ type ToolBorrow = {
   id: string;
   borrower_name: string;
   borrower_email: string;
+  user_type?: "student" | "other";
+  enrollment_number?: string;
+  course_code?: string;
+  faculty_name?: string;
+  section_number?: string;
   project_title: string;
   item_id: string;
   item_name: string;
@@ -60,7 +82,11 @@ type ToolBorrow = {
   borrowed_date: string;
   expected_return_date: string;
   status: "active" | "returned" | "overdue";
+  approval_status?: "PENDING" | "YES" | "NO";
+  return_condition?: "RETURNED PROPERLY" | "NOT RETURNED / IN USE" | "OVERDUE / DAMAGED";
+  actual_return_date?: string;
   notes?: string;
+  created_at?: string;
 };
 
 type SelectedToolRequest = {
@@ -72,6 +98,25 @@ type SelectedToolRequest = {
 
 export default function LabPortalDashboard() {
   const [activeTab, setActiveTab] = useState<"register" | "borrow" | "records">("register");
+
+  // Google Sheets OAuth State
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
+  const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
+  const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
+  const [spreadsheetTitle, setSpreadsheetTitle] = useState<string | null>(null);
+  const [sheetsSyncing, setSheetsSyncing] = useState(false);
+  const [sheetsSyncMessage, setSheetsSyncMessage] = useState<string | null>(null);
+
+  // User confirmation dialog state for mutating Google Sheets data
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    description: string;
+    confirmText: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // User classification
   const [userType, setUserType] = useState<"student" | "other">("student");
@@ -163,9 +208,320 @@ export default function LabPortalDashboard() {
     }
   }
 
+  // Initialize Auth
   useEffect(() => {
     loadDashboardData();
+
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+        initializeGoogleSpreadsheet(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+      }
+    );
+
+    return () => unsubscribe();
   }, []);
+
+  // Initialize or connect Google Spreadsheet
+  async function initializeGoogleSpreadsheet(token: string) {
+    try {
+      const res = await fetch("/api/sheets", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "init" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSpreadsheetId(data.spreadsheetId);
+        setSpreadsheetUrl(data.spreadsheetUrl);
+        setSpreadsheetTitle(data.title);
+      }
+    } catch (err) {
+      console.error("Failed to initialize Google Sheet:", err);
+    }
+  }
+
+  // Handle Google Sign In
+  async function handleGoogleSignIn() {
+    setIsSigningInGoogle(true);
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setGoogleUser(res.user);
+        setGoogleToken(res.accessToken);
+        setAccessTokenInMemory(res.accessToken);
+        await initializeGoogleSpreadsheet(res.accessToken);
+      }
+    } catch (err) {
+      console.error("Google login failed:", err);
+    } finally {
+      setIsSigningInGoogle(false);
+    }
+  }
+
+  // Handle Google Sign Out
+  async function handleGoogleSignOut() {
+    await logoutGoogle();
+    setGoogleUser(null);
+    setGoogleToken(null);
+    setSpreadsheetId(null);
+    setSpreadsheetUrl(null);
+    setSpreadsheetTitle(null);
+  }
+
+  // Trigger sync all to Google Sheets with explicit confirmation
+  function triggerSyncAllConfirmation() {
+    if (!googleToken || !spreadsheetId) return;
+
+    setConfirmDialog({
+      isOpen: true,
+      title: "Update Google Sheet with all portal records?",
+      description: `This will update ${projectsList.length} registered project(s) and ${borrows.length} tool borrow record(s) with their current Admin Approvals (YES/NO) and Return Conditions into "${spreadsheetTitle || "Google Sheet"}".`,
+      confirmText: "Sync to Google Sheet",
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setSheetsSyncing(true);
+        setSheetsSyncMessage("Updating spreadsheet...");
+        try {
+          const res = await fetch("/api/sheets", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${googleToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              action: "sync_all",
+              spreadsheetId,
+              projects: projectsList.map((p) => ({
+                reference_code: p.reference_code,
+                title: p.title,
+                lead_name: p.lead_name,
+                lead_email: p.lead_email,
+                user_type: p.user_type,
+                enrollment_number: p.enrollment_number,
+                course_code: p.course_code,
+                year_of_study: p.year_of_study,
+                faculty_name: p.faculty_name,
+                section_number: p.section_number,
+                other_role: p.other_role,
+                other_phone: p.other_phone,
+                summary: p.summary,
+                approval_status: p.approval_status || (p.status === "approved" ? "YES" : p.status === "rejected" ? "NO" : "PENDING"),
+                reviewed_by: p.reviewed_by || googleUser?.email || "Admin",
+                review_date: new Date().toISOString().split("T")[0],
+                review_notes: p.review_note || "",
+                created_at: p.created_at,
+              })),
+              borrows: borrows.map((b) => ({
+                id: b.id,
+                item_name: b.item_name,
+                quantity: b.quantity,
+                borrower_name: b.borrower_name,
+                borrower_email: b.borrower_email,
+                project_title: b.project_title,
+                borrowed_date: b.borrowed_date,
+                expected_return_date: b.expected_return_date,
+                approval_status: b.approval_status || "PENDING",
+                return_status: b.return_condition || (b.status === "returned" ? "RETURNED PROPERLY" : "NOT RETURNED / IN USE"),
+                actual_return_date: b.actual_return_date || "",
+                notes: b.notes || "",
+                created_at: b.created_at,
+              })),
+            }),
+          });
+          if (res.ok) {
+            setSheetsSyncMessage("Successfully synced all records to Google Sheets!");
+            setTimeout(() => setSheetsSyncMessage(null), 4000);
+          } else {
+            setSheetsSyncMessage("Error updating Google Sheets.");
+          }
+        } catch {
+          setSheetsSyncMessage("Network error during sync.");
+        } finally {
+          setSheetsSyncing(false);
+        }
+      },
+    });
+  }
+
+  // Pull external updates from Google Sheet
+  async function handlePullSheetUpdates() {
+    if (!googleToken || !spreadsheetId) return;
+    setSheetsSyncing(true);
+    setSheetsSyncMessage("Checking Google Sheet for admin edits...");
+    try {
+      const res = await fetch("/api/sheets", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${googleToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "pull_updates", spreadsheetId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Update local project approvals
+        if (data.projectApprovals) {
+          setProjectsList((prev) =>
+            prev.map((p) => {
+              const match = data.projectApprovals[p.reference_code];
+              if (match) {
+                return {
+                  ...p,
+                  approval_status: match.approval,
+                  status: match.approval === "YES" ? "approved" : match.approval === "NO" ? "rejected" : "pending",
+                  review_note: match.notes || p.review_note,
+                };
+              }
+              return p;
+            })
+          );
+        }
+        // Update local borrow statuses
+        if (data.borrowUpdates) {
+          setBorrows((prev) =>
+            prev.map((b) => {
+              const match = data.borrowUpdates[b.id];
+              if (match) {
+                return {
+                  ...b,
+                  approval_status: match.approval,
+                  return_condition: match.returnStatus,
+                  status: match.returnStatus === "RETURNED PROPERLY" ? "returned" : "active",
+                };
+              }
+              return b;
+            })
+          );
+        }
+        setSheetsSyncMessage("Synced latest approvals from Google Sheet!");
+        setTimeout(() => setSheetsSyncMessage(null), 4000);
+      }
+    } catch {
+      setSheetsSyncMessage("Failed to pull updates from Google Sheet.");
+    } finally {
+      setSheetsSyncing(false);
+    }
+  }
+
+  // Admin Project Approval Toggle (YES / NO / PENDING)
+  async function handleProjectApproval(referenceCode: string, approval: "YES" | "NO" | "PENDING") {
+    // 1. Update local state
+    setProjectsList((prev) =>
+      prev.map((p) =>
+        p.reference_code === referenceCode
+          ? {
+              ...p,
+              approval_status: approval,
+              status: approval === "YES" ? "approved" : approval === "NO" ? "rejected" : "pending",
+            }
+          : p
+      )
+    );
+
+    // 2. Persist to API
+    try {
+      await fetch("/api/admin/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "project",
+          reference_code: referenceCode,
+          approval_status: approval,
+          reviewer: googleUser?.email || "Admin",
+          review_notes: `Approval set to ${approval} by admin`,
+        }),
+      });
+
+      // 3. Update Google Sheet if connected
+      if (googleToken && spreadsheetId) {
+        fetch("/api/sheets", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "update_project",
+            spreadsheetId,
+            reference_code: referenceCode,
+            approval_status: approval,
+            reviewed_by: googleUser?.email || "Admin",
+            review_notes: `Updated on ${new Date().toLocaleDateString()}`,
+          }),
+        }).catch(() => {});
+      }
+    } catch {
+      // Handled
+    }
+  }
+
+  // Admin Tool Borrow Status Update (Approval YES/NO & Return Condition)
+  async function handleToolBorrowApproval(
+    borrowId: string,
+    approval: "YES" | "NO" | "PENDING",
+    returnCondition: "RETURNED PROPERLY" | "NOT RETURNED / IN USE" | "OVERDUE / DAMAGED"
+  ) {
+    // 1. Update local state
+    setBorrows((prev) =>
+      prev.map((b) =>
+        b.id === borrowId
+          ? {
+              ...b,
+              approval_status: approval,
+              return_condition: returnCondition,
+              status: returnCondition === "RETURNED PROPERLY" ? "returned" : "active",
+            }
+          : b
+      )
+    );
+
+    // 2. Persist to API
+    try {
+      await fetch("/api/admin/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "tool_borrow",
+          borrow_id: borrowId,
+          approval_status: approval,
+          return_status: returnCondition,
+          notes: returnCondition === "RETURNED PROPERLY" ? "Returned in good condition" : "",
+        }),
+      });
+
+      // 3. Update Google Sheet if connected
+      if (googleToken && spreadsheetId) {
+        fetch("/api/sheets", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "update_borrow",
+            spreadsheetId,
+            borrow_id: borrowId,
+            approval_status: approval,
+            return_status: returnCondition,
+            notes: returnCondition === "RETURNED PROPERLY" ? "Verified returned properly" : "",
+          }),
+        }).catch(() => {});
+      }
+
+      loadDashboardData();
+    } catch {
+      // Handled
+    }
+  }
 
   // AU Email validation helper
   const isAuEmail = leadEmail.toLowerCase().includes("@ahduni.edu");
@@ -205,7 +561,7 @@ export default function LabPortalDashboard() {
           summary: fullSummary,
           lead_name: leadName.trim(),
           lead_email: leadEmail.trim(),
-          organization: userType === "student" ? "Ahmedabad University" : (otherOrganization.trim() || organization.trim()),
+          organization: userType === "student" ? "Ahmedabad University" : (otherOrganization.trim() || organization),
           team_members: teamMembers.trim(),
           acknowledgement: "on",
           user_type: userType,
@@ -237,7 +593,40 @@ export default function LabPortalDashboard() {
         return;
       }
 
-      setProjectSuccessRef(data.reference || "SUBMITTED");
+      const generatedRef = data.reference || "SUBMITTED";
+      setProjectSuccessRef(generatedRef);
+
+      // Auto-append to Google Sheet if active
+      if (googleToken && spreadsheetId) {
+        fetch("/api/sheets", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "append_project",
+            spreadsheetId,
+            project: {
+              reference_code: generatedRef,
+              title: projectTitle.trim(),
+              lead_name: leadName.trim(),
+              lead_email: leadEmail.trim(),
+              user_type: userType,
+              enrollment_number: enrollmentNumber.trim(),
+              course_code: courseCode.trim(),
+              year_of_study: yearOfStudy,
+              faculty_name: facultyName.trim(),
+              section_number: sectionNumber.trim(),
+              other_role: otherRole.trim(),
+              other_phone: otherPhone.trim(),
+              summary: fullSummary,
+              approval_status: "PENDING",
+            },
+          }),
+        }).catch(() => {});
+      }
+
       setProjectTitle("");
       setProjectDescription("");
       setProblemStatement("");
@@ -296,6 +685,41 @@ export default function LabPortalDashboard() {
         return;
       }
 
+      const borrowRecord = data.borrow;
+
+      // Auto-append to Google Sheet
+      if (googleToken && spreadsheetId && borrowRecord) {
+        fetch("/api/sheets", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "append_borrow",
+            spreadsheetId,
+            borrow: {
+              id: borrowRecord.id,
+              item_name: selectedToolForCheckout.name,
+              quantity: Number(borrowQty),
+              borrower_name: borrowerName.trim(),
+              borrower_email: borrowerEmail.trim(),
+              user_type: borrowUserType,
+              enrollment_number: borrowEnrollment.trim(),
+              course_code: borrowCourse.trim(),
+              faculty_name: borrowFaculty.trim(),
+              section_number: borrowSection.trim(),
+              project_title: borrowProjectTitle.trim() || "Independent Lab Prototype",
+              borrowed_date: new Date().toISOString().split("T")[0],
+              expected_return_date: borrowReturnDate,
+              approval_status: "PENDING",
+              return_status: "NOT RETURNED / IN USE",
+              notes: borrowNotes.trim(),
+            },
+          }),
+        }).catch(() => {});
+      }
+
       setBorrowSuccess(`Successfully borrowed ${borrowQty}x ${selectedToolForCheckout.name}!`);
       setBorrowQty(1);
       setBorrowNotes("");
@@ -305,22 +729,6 @@ export default function LabPortalDashboard() {
     } catch {
       setBorrowError("Network error recording tool checkout.");
       setSubmittingBorrow(false);
-    }
-  }
-
-  // Return tool
-  async function handleReturnTool(borrowId: string) {
-    try {
-      const res = await fetch("/api/tools/borrow", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ borrow_id: borrowId }),
-      });
-      if (res.ok) {
-        loadDashboardData();
-      }
-    } catch {
-      // Ignore
     }
   }
 
@@ -355,10 +763,63 @@ export default function LabPortalDashboard() {
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 sm:inline-flex border border-emerald-200">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Live Lab Desk Active
-            </span>
+            {googleUser ? (
+              <div className="flex items-center gap-2">
+                <div className="hidden sm:flex flex-col text-right">
+                  <span className="text-xs font-semibold text-slate-900">{googleUser.displayName || googleUser.email}</span>
+                  <span className="text-[10px] text-emerald-600 font-medium">Google Sheets Connected</span>
+                </div>
+                {spreadsheetUrl && (
+                  <a
+                    href={spreadsheetUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 transition"
+                  >
+                    <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>Open Sheet</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={handleGoogleSignOut}
+                  title="Sign out of Google"
+                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isSigningInGoogle}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 active:bg-slate-100"
+              >
+                {/* Official Google G Icon */}
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.15z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.24v3.15C3.26 21.36 7.33 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.24C.45 8.15 0 9.99 0 12s.45 3.85 1.24 5.42l4.04-3.15z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.24 6.58l4.04 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                  />
+                </svg>
+                <span>{isSigningInGoogle ? "Connecting..." : "Connect Google Sheets"}</span>
+              </button>
+            )}
+
             <Link
               href="/login"
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
@@ -371,6 +832,74 @@ export default function LabPortalDashboard() {
 
       {/* Main Content */}
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+        {/* Google Sheets Integration Banner */}
+        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="rounded-xl bg-emerald-50 p-2.5 text-emerald-700 border border-emerald-200">
+                <FileSpreadsheet className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-tl-navy">Google Sheets Live Synchronization</h3>
+                  {googleUser ? (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                      LIVE CONNECTED
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                      OFFLINE
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500 max-w-2xl">
+                  {googleUser
+                    ? `Connected to "${spreadsheetTitle || "Tinkerers' Lab Database"}". Registered projects and tool borrows automatically sync with Admin Approval (YES/NO) and Return Status.`
+                    : "Sign in with your Google account to automatically mirror every registration and tool borrow into Google Sheets with admin approval workflows."}
+                </p>
+                {sheetsSyncMessage && (
+                  <div className="mt-2 text-xs font-medium text-emerald-700 animate-fadeIn">
+                    ✓ {sheetsSyncMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {googleUser ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handlePullSheetUpdates}
+                    disabled={sheetsSyncing}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 text-sky-600 ${sheetsSyncing ? "animate-spin" : ""}`} />
+                    <span>Pull Sheet Approvals</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={triggerSyncAllConfirmation}
+                    disabled={sheetsSyncing}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#0369a1] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#025a8a] disabled:opacity-50"
+                  >
+                    <span>Sync All Records</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  disabled={isSigningInGoogle}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 transition"
+                >
+                  Authorize Google Sheets
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* Quick Stat Summary Cards */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 mb-8">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -383,7 +912,10 @@ export default function LabPortalDashboard() {
               </div>
             </div>
             <div className="mt-3 text-2xl font-bold text-tl-navy">{projectsList.length}</div>
-            <div className="mt-1 text-xs text-slate-500">Proposals registered in lab system</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {projectsList.filter((p) => p.approval_status === "YES" || p.status === "approved").length} Approved (YES) •{" "}
+              {projectsList.filter((p) => p.approval_status === "NO" || p.status === "rejected").length} Rejected (NO)
+            </div>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -411,7 +943,9 @@ export default function LabPortalDashboard() {
               </div>
             </div>
             <div className="mt-3 text-2xl font-bold text-tl-navy">{activeBorrows.length} Active</div>
-            <div className="mt-1 text-xs text-slate-500">Currently in maker use</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {borrows.filter((b) => b.return_condition === "RETURNED PROPERLY" || b.status === "returned").length} Returned Properly
+            </div>
           </div>
         </div>
 
@@ -456,10 +990,10 @@ export default function LabPortalDashboard() {
             }`}
           >
             <Layers className="h-4 w-4" />
-            <span>3. Current Records &amp; Status</span>
+            <span>3. Current Records &amp; Admin Approvals</span>
             {activeBorrows.length > 0 && (
               <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800 font-bold">
-                {activeBorrows.length} borrowed
+                {activeBorrows.length} out
               </span>
             )}
           </button>
@@ -493,6 +1027,14 @@ export default function LabPortalDashboard() {
                   <div className="my-4 inline-block rounded-lg border border-emerald-300 bg-white px-4 py-2 font-mono text-base font-bold text-emerald-900">
                     {projectSuccessRef}
                   </div>
+                  {googleUser && spreadsheetUrl && (
+                    <p className="text-xs text-emerald-700 font-medium mb-4">
+                      ✓ Automatically synced to{" "}
+                      <a href={spreadsheetUrl} target="_blank" rel="noreferrer" className="underline font-bold">
+                        Google Sheet (Projects tab) ↗
+                      </a>
+                    </p>
+                  )}
                   <p className="text-xs text-emerald-600">
                     Keep this reference code for your records and for follow-up with Tinkerers’ Lab mentors.
                   </p>
@@ -615,7 +1157,6 @@ export default function LabPortalDashboard() {
                         )}
                       </div>
 
-                      {/* If Student: Enrollment Num, Course Code, Year, Faculty, Section */}
                       {userType === "student" ? (
                         <>
                           <div>
@@ -697,7 +1238,6 @@ export default function LabPortalDashboard() {
                           </div>
                         </>
                       ) : (
-                        /* If Other: Role, Organization, Phone, ID, Purpose */
                         <>
                           <div>
                             <label htmlFor="reg-other-role" className="mb-1.5 block text-sm font-medium text-slate-700">
@@ -1140,7 +1680,7 @@ export default function LabPortalDashboard() {
               </div>
             )}
 
-            {/* Standalone Tool Checkout Modal with full AU student / other details */}
+            {/* Standalone Tool Checkout Modal */}
             {selectedToolForCheckout && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 overflow-y-auto">
                 <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl border border-slate-200 my-8">
@@ -1385,24 +1925,28 @@ export default function LabPortalDashboard() {
           </div>
         )}
 
-        {/* TAB 3: CURRENT RECORDS & STATUS */}
+        {/* TAB 3: CURRENT RECORDS & ADMIN APPROVALS */}
         {activeTab === "records" && (
           <div className="space-y-8">
-            {/* Active Tool Borrows */}
+            {/* Active Tool Borrows & Return Condition */}
             <div>
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
                 <div>
-                  <h2 className="text-xl font-bold text-tl-navy">Active Tool Borrows</h2>
-                  <p className="text-xs text-slate-500">Currently checked out tools and due dates</p>
+                  <h2 className="text-xl font-bold text-tl-navy">Tool Borrows &amp; Return Tracking</h2>
+                  <p className="text-xs text-slate-500">
+                    Admin Approval (YES/NO) and verification of equipment returned properly
+                  </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={loadDashboardData}
-                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-1"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Refresh
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={loadDashboardData}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-1"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Refresh
+                  </button>
+                </div>
               </div>
 
               {borrows.length === 0 ? (
@@ -1413,57 +1957,120 @@ export default function LabPortalDashboard() {
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm text-slate-600">
-                      <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                      <thead className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
                         <tr>
-                          <th className="px-5 py-3 font-semibold">Tool Item</th>
-                          <th className="px-5 py-3 font-semibold">Borrower</th>
-                          <th className="px-5 py-3 font-semibold">Project</th>
-                          <th className="px-5 py-3 font-semibold">Borrowed</th>
-                          <th className="px-5 py-3 font-semibold">Expected Return</th>
-                          <th className="px-5 py-3 font-semibold">Status</th>
-                          <th className="px-5 py-3 font-semibold text-right">Action</th>
+                          <th className="px-4 py-3 font-semibold">Tool Item</th>
+                          <th className="px-4 py-3 font-semibold">Borrower Info</th>
+                          <th className="px-4 py-3 font-semibold">Project &amp; Due</th>
+                          <th className="px-4 py-3 font-semibold">Admin Approval</th>
+                          <th className="px-4 py-3 font-semibold">Return Condition</th>
+                          <th className="px-4 py-3 font-semibold text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {borrows.map((b) => (
-                          <tr key={b.id} className="hover:bg-slate-50/70 transition">
-                            <td className="px-5 py-3.5 font-medium text-slate-900">
-                              <div>{b.item_name}</div>
-                              <div className="text-xs text-slate-400">Qty: {b.quantity}</div>
-                            </td>
-                            <td className="px-5 py-3.5">
-                              <div className="text-slate-900 font-medium">{b.borrower_name}</div>
-                              <div className="text-xs text-slate-400">{b.borrower_email}</div>
-                            </td>
-                            <td className="px-5 py-3.5 text-xs text-slate-600">{b.project_title}</td>
-                            <td className="px-5 py-3.5 text-xs text-slate-500">{b.borrowed_date}</td>
-                            <td className="px-5 py-3.5 text-xs font-semibold text-slate-700">
-                              {b.expected_return_date}
-                            </td>
-                            <td className="px-5 py-3.5">
-                              <span
-                                className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ${
-                                  b.status === "active"
-                                    ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                    : "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                }`}
-                              >
-                                {b.status === "active" ? "In Use" : "Returned"}
-                              </span>
-                            </td>
-                            <td className="px-5 py-3.5 text-right">
-                              {b.status === "active" && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleReturnTool(b.id)}
-                                  className="rounded-lg bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 px-3 py-1.5 text-xs font-semibold text-slate-700 transition border border-slate-200"
+                        {borrows.map((b) => {
+                          const currentApproval = b.approval_status || "PENDING";
+                          const returnCondition = b.return_condition || (b.status === "returned" ? "RETURNED PROPERLY" : "NOT RETURNED / IN USE");
+
+                          return (
+                            <tr key={b.id} className="hover:bg-slate-50/70 transition">
+                              <td className="px-4 py-3 font-medium text-slate-900">
+                                <div className="font-bold text-slate-900">{b.item_name}</div>
+                                <div className="text-xs text-slate-500">Qty: {b.quantity} • ID: {b.id}</div>
+                              </td>
+
+                              <td className="px-4 py-3 text-xs">
+                                <div className="font-semibold text-slate-900">{b.borrower_name}</div>
+                                <div className="text-slate-500">{b.borrower_email}</div>
+                                {b.enrollment_number && (
+                                  <div className="text-slate-400 font-mono text-[10px]">ID: {b.enrollment_number}</div>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3 text-xs">
+                                <div className="font-medium text-slate-700">{b.project_title}</div>
+                                <div className="text-slate-400">Due: {b.expected_return_date}</div>
+                              </td>
+
+                              <td className="px-4 py-3 text-xs">
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold ${
+                                    currentApproval === "YES"
+                                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                      : currentApproval === "NO"
+                                      ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                      : "bg-amber-50 text-amber-700 border border-amber-200"
+                                  }`}
                                 >
-                                  Return Tool
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                                  {currentApproval === "YES" && <Check className="h-3 w-3" />}
+                                  {currentApproval === "NO" && <X className="h-3 w-3" />}
+                                  {currentApproval}
+                                </span>
+                              </td>
+
+                              <td className="px-4 py-3 text-xs">
+                                <span
+                                  className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ${
+                                    returnCondition === "RETURNED PROPERLY"
+                                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                      : returnCondition === "OVERDUE / DAMAGED"
+                                      ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                      : "bg-amber-50 text-amber-700 border border-amber-200"
+                                  }`}
+                                >
+                                  {returnCondition}
+                                </span>
+                              </td>
+
+                              <td className="px-4 py-3 text-right text-xs">
+                                <div className="flex flex-col items-end gap-1.5">
+                                  {/* Approval Toggle */}
+                                  <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 shadow-xs">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToolBorrowApproval(b.id, "YES", returnCondition)}
+                                      title="Approve borrow"
+                                      className={`px-2 py-0.5 rounded text-[11px] font-bold transition ${
+                                        currentApproval === "YES" ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                                      }`}
+                                    >
+                                      YES
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToolBorrowApproval(b.id, "NO", returnCondition)}
+                                      title="Deny borrow"
+                                      className={`px-2 py-0.5 rounded text-[11px] font-bold transition ${
+                                        currentApproval === "NO" ? "bg-rose-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                                      }`}
+                                    >
+                                      NO
+                                    </button>
+                                  </div>
+
+                                  {/* Return Condition Toggle */}
+                                  {returnCondition !== "RETURNED PROPERLY" ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToolBorrowApproval(b.id, currentApproval, "RETURNED PROPERLY")}
+                                      className="rounded bg-emerald-50 border border-emerald-200 text-emerald-800 hover:bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold transition"
+                                    >
+                                      Mark Returned Properly
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToolBorrowApproval(b.id, currentApproval, "NOT RETURNED / IN USE")}
+                                      className="text-slate-400 hover:text-slate-600 text-[10px]"
+                                    >
+                                      Reopen / In Use
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1471,11 +2078,13 @@ export default function LabPortalDashboard() {
               )}
             </div>
 
-            {/* Registered Projects in Portal */}
+            {/* Registered Projects & Admin Approval */}
             <div>
               <div className="mb-4">
-                <h2 className="text-xl font-bold text-tl-navy">Registered Projects</h2>
-                <p className="text-xs text-slate-500">All submitted student &amp; maker lab proposals</p>
+                <h2 className="text-xl font-bold text-tl-navy">Registered Projects &amp; Approvals</h2>
+                <p className="text-xs text-slate-500">
+                  Manage Admin Approval (YES / NO) synced directly to Google Sheet
+                </p>
               </div>
 
               {projectsList.length === 0 ? (
@@ -1484,50 +2093,119 @@ export default function LabPortalDashboard() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {projectsList.map((p) => (
-                    <div
-                      key={p.id}
-                      className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-xs font-bold text-[#0369a1] bg-sky-50 border border-sky-200 px-2 py-0.5 rounded">
-                          {p.reference_code}
-                        </span>
-                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 capitalize">
-                          {p.status}
-                        </span>
-                      </div>
+                  {projectsList.map((p) => {
+                    const currentApproval = p.approval_status || (p.status === "approved" ? "YES" : p.status === "rejected" ? "NO" : "PENDING");
 
-                      <h3 className="font-bold text-base text-tl-navy">{p.title}</h3>
-                      <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
-                        {p.summary}
-                      </p>
+                    return (
+                      <div
+                        key={p.id}
+                        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3 flex flex-col justify-between"
+                      >
+                        <div className="space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-mono text-xs font-bold text-[#0369a1] bg-sky-50 border border-sky-200 px-2 py-0.5 rounded">
+                              {p.reference_code}
+                            </span>
+                            <span
+                              className={`inline-flex items-center gap-1 text-xs font-bold px-2.5 py-0.5 rounded-full ${
+                                currentApproval === "YES"
+                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                  : currentApproval === "NO"
+                                  ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                  : "bg-amber-50 text-amber-700 border border-amber-200"
+                              }`}
+                            >
+                              Approval: {currentApproval}
+                            </span>
+                          </div>
 
-                      {p.user_type === "student" && p.enrollment_number && (
-                        <div className="rounded-lg bg-slate-50 p-2 text-xs text-slate-600 border border-slate-100 flex flex-wrap gap-x-3 gap-y-1">
-                          <span><strong>Enrollment:</strong> {p.enrollment_number}</span>
-                          {p.course_code && <span><strong>Course:</strong> {p.course_code}</span>}
-                          {p.faculty_name && <span><strong>Mentor:</strong> {p.faculty_name}</span>}
+                          <h3 className="font-bold text-base text-tl-navy">{p.title}</h3>
+                          <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
+                            {p.summary}
+                          </p>
+
+                          {p.user_type === "student" && p.enrollment_number && (
+                            <div className="rounded-lg bg-slate-50 p-2 text-xs text-slate-600 border border-slate-100 flex flex-wrap gap-x-3 gap-y-1">
+                              <span><strong>ID:</strong> {p.enrollment_number}</span>
+                              {p.course_code && <span><strong>Course:</strong> {p.course_code}</span>}
+                              {p.faculty_name && <span><strong>Mentor:</strong> {p.faculty_name}</span>}
+                            </div>
+                          )}
                         </div>
-                      )}
 
-                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-                        <div>
-                          Lead: <span className="font-medium text-slate-700">{p.lead_name}</span>
+                        <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                          <div>
+                            <div className="text-slate-500">Lead: <span className="font-medium text-slate-700">{p.lead_name}</span></div>
+                            <div className="text-[10px] text-slate-400">{new Date(p.created_at).toLocaleDateString()}</div>
+                          </div>
+
+                          {/* Admin YES / NO Approval Buttons */}
+                          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
+                            <span className="text-[10px] text-slate-500 px-1 font-semibold">Admin:</span>
+                            <button
+                              type="button"
+                              onClick={() => handleProjectApproval(p.reference_code, "YES")}
+                              className={`px-2 py-0.5 rounded text-xs font-bold transition ${
+                                currentApproval === "YES"
+                                  ? "bg-emerald-600 text-white shadow-xs"
+                                  : "bg-white text-slate-700 hover:bg-emerald-50 hover:text-emerald-700"
+                              }`}
+                            >
+                              YES
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleProjectApproval(p.reference_code, "NO")}
+                              className={`px-2 py-0.5 rounded text-xs font-bold transition ${
+                                currentApproval === "NO"
+                                  ? "bg-rose-600 text-white shadow-xs"
+                                  : "bg-white text-slate-700 hover:bg-rose-50 hover:text-rose-700"
+                              }`}
+                            >
+                              NO
+                            </button>
+                          </div>
                         </div>
-                        <div>{new Date(p.created_at).toLocaleDateString()}</div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
           </div>
         )}
 
+        {/* Confirmation Modal for Mutating Workspace/Sheets Operations */}
+        {confirmDialog?.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl border border-slate-200">
+              <h3 className="text-base font-bold text-tl-navy">{confirmDialog.title}</h3>
+              <p className="mt-2 text-xs leading-relaxed text-slate-600">
+                {confirmDialog.description}
+              </p>
+              <div className="mt-6 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDialog(null)}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDialog.onConfirm}
+                  className="rounded-lg bg-[#0369a1] px-4 py-2 text-xs font-semibold text-white hover:bg-[#025a8a]"
+                >
+                  {confirmDialog.confirmText}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Footer */}
         <footer className="mt-12 text-center text-xs text-slate-500 border-t border-slate-200 pt-6">
-          Tinkerers’ Lab · Ahmedabad University
+          Tinkerers’ Lab · Ahmedabad University • Google Sheets Synchronized
         </footer>
       </main>
     </div>

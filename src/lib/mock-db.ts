@@ -25,6 +25,7 @@ export type MockProject = {
   other_id_number?: string;
   other_purpose?: string;
   borrowed_tools_summary?: string;
+  approval_status?: "PENDING" | "YES" | "NO";
   status: "pending" | "approved" | "rejected" | "needs_changes" | "in_progress" | "completed" | "cancelled";
   review_note: string;
   reviewed_by: string | null;
@@ -74,6 +75,9 @@ export type MockToolBorrow = {
   borrowed_date: string;
   expected_return_date: string;
   status: "active" | "returned" | "overdue";
+  approval_status?: "PENDING" | "YES" | "NO";
+  return_condition?: "RETURNED PROPERLY" | "NOT RETURNED / IN USE" | "OVERDUE / DAMAGED";
+  actual_return_date?: string;
   notes?: string;
 };
 
@@ -381,6 +385,8 @@ export const mockDb = {
     const record = globalToolBorrows.find((b) => b.id === borrowId);
     if (!record || record.status === "returned") return false;
     record.status = "returned";
+    record.return_condition = "RETURNED PROPERLY";
+    record.actual_return_date = new Date().toISOString().split("T")[0];
     const item = globalInventory.find((i) => i.id === record.item_id);
     if (item && item.stock_balances[0]) {
       item.stock_balances[0].quantity_reserved = Math.max(
@@ -388,6 +394,50 @@ export const mockDb = {
         (item.stock_balances[0].quantity_reserved || 0) - record.quantity
       );
     }
+    return true;
+  },
+  updateProjectApproval(
+    referenceCode: string,
+    approval: "PENDING" | "YES" | "NO",
+    notes?: string,
+    reviewer?: string
+  ): boolean {
+    const p = globalProjects.find((x) => x.reference_code === referenceCode);
+    if (!p) return false;
+    p.approval_status = approval;
+    if (approval === "YES") p.status = "approved";
+    if (approval === "NO") p.status = "rejected";
+    if (approval === "PENDING") p.status = "pending";
+    if (notes) p.review_note = notes;
+    if (reviewer) p.reviewed_by = reviewer;
+    p.reviewed_at = new Date().toISOString();
+    p.updated_at = new Date().toISOString();
+    return true;
+  },
+  updateToolBorrowStatus(
+    borrowId: string,
+    approval: "PENDING" | "YES" | "NO",
+    returnCondition: "RETURNED PROPERLY" | "NOT RETURNED / IN USE" | "OVERDUE / DAMAGED",
+    notes?: string
+  ): boolean {
+    const b = globalToolBorrows.find((x) => x.id === borrowId);
+    if (!b) return false;
+    b.approval_status = approval;
+    b.return_condition = returnCondition;
+    if (returnCondition === "RETURNED PROPERLY") {
+      b.status = "returned";
+      b.actual_return_date = new Date().toISOString().split("T")[0];
+      const item = globalInventory.find((i) => i.id === b.item_id);
+      if (item && item.stock_balances[0]) {
+        item.stock_balances[0].quantity_reserved = Math.max(
+          0,
+          (item.stock_balances[0].quantity_reserved || 0) - b.quantity
+        );
+      }
+    } else {
+      b.status = "active";
+    }
+    if (notes) b.notes = notes;
     return true;
   },
 };
